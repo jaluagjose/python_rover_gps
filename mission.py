@@ -4,6 +4,7 @@ from gps import GPSReader
 from navigation import Navigator
 from steering import Steering
 from motors import Motors
+from imu import IMU
 
 class MissionController:
 
@@ -18,6 +19,8 @@ class MissionController:
 		self.target_lon = target_lon
 
 		self.TARGET_RADIUS = 2.0 # meters
+
+		self.imu = IMU()
 
 	def run(self):
 
@@ -52,7 +55,7 @@ class MissionController:
 				break
 
 			# Step 3: CURRENT HEADING
-			current_heading = 0 #replace later with IMU
+			current_heading = self.imu.read_heading() #replace later with IMU
 
 			# Step 4: steering decision
 			action = self.steer.compute_action(current_heading, bearing)
