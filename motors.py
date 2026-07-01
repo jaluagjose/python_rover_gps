@@ -1,5 +1,8 @@
 import time
 from Rosmaster_Lib import Rosmaster
+from heading import HeadingEstimator
+
+heading_estimator = HeadingEstimator()
 
 class Motors:
 
@@ -17,9 +20,11 @@ class Motors:
 
 	def left(self):
 		self.bot.set_car_motion(0, self.TURN_SPEED, 0)
+		heading_estimator.update_turn("LEFT", 60, 0.5)
 
 	def right(self):
 		self.bot.set_car_motion(0, -self.TURN_SPEED, 0)
+		heading_estimator.update_turn("RIGHT", 60, 0.5)
 
 	def stop(self):
 		self.bot.set_car_motion(0, 0, 0)
