@@ -6,13 +6,10 @@ import socket
 import threading
 
 import rclpy
-import cv2
 from rclpy.node import Node
-from sensor_msgs.msg import NavSatFix, Imu, Image
+from sensor_msgs.msg import NavSatFix, Imu
 from geometry_msgs.msg import Twist
 from transforms3d.euler import quat2euler
-from cv_bridge import CvBridge
-
 
 
 HOST = "0.0.0.0"
@@ -28,7 +25,6 @@ STATE_NAVIGATING = "NAVIGATING_TO_TARGET"
 STATE_TARGET_REACHED = "TARGET_REACHED"
 STATE_RETURNING = "RETURNING_HOME"
 STATE_HOME_REACHED = "HOME_REACHED"
-STATE_SCANNING = "SCANNING_360"
 
 
 class NetworkWaypointController(Node):
@@ -37,15 +33,6 @@ class NetworkWaypointController(Node):
 		super().__init__("network_waypoint_controller")
 
 		self.state = STATE_WAITING
-
-		# Video
-		self.bridge = CvBridge()
-		self.latest_frame = None
-
-		self.video_writer = None
-		self.scan_start_heading = None
-		self.scan_total_turn = 0.0
-		self.scan_last_heading = None
 
 		self.lat = None
 		self.lon = None
@@ -66,7 +53,6 @@ class NetworkWaypointController(Node):
 
 		self.create_subscription(NavSatFix, "/fix", self.gps_callback, 10)
 		self.create_subscription(Imu, "/imu/data", self.imu_callback, 10)
-		self.create_subscription(Image, "/camera/color/image_raw", self.camera_callback, 10)
 
 		self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
@@ -97,12 +83,6 @@ class NetworkWaypointController(Node):
 		])
 
 		self.heading = (math.degrees(yaw) + 360) % 360
-
-	def camera_callback(self, msg):
-		try:
-			self.latest_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="brg8")
-		except Exception as e:
-			print(f"Camera error: {e}")
 
 	def network_server(self):
 		server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -164,9 +144,6 @@ class NetworkWaypointController(Node):
 
 		elif self.state == STATE_TARGET_REACHED:
 			self.target_reached_state()
-		
-		elif self.state == STATE_SCANNING:
-			self.scanning_state()
 
 	def waiting_for_target_state(self):
 		self.stop()
@@ -181,91 +158,14 @@ class NetworkWaypointController(Node):
 
 		print(f"State: {STATE_TARGET_REACHED}")
 		print("Target Reached.")
-		print(f"State: {STATE_SCANNING}")
-		print("Starting 360 video scan...")
 
 		self.last_distance = None
 		self.bad_distance_count = 0
 
-		self.start_scan()
+		print(f"State: {STATE_RETURNING}")
+		print("Returning home...")
 
 		self.state = STATE_RETURNING
-
-	def start_scan(self):
-		self.scan_start_heading = self.heading
-		self.scan_last_heading = self.heading
-		self.scan_total_turn = 0.0
-
-		timestamp = int(time.time())
-		video_path = f"videos/scan_{timestamp}.mp4"
-
-		if self.latest_frame is None:
-			print("No camera frame yet. Scan will move, but video may not save")
-			self.video_writer = None
-			return
-		
-		height, width, channels = self.latest_frame.shape
-
-		fourcc = cv2.Videowriter_fourcc("mp4v")
-
-		self.video_writer = cv2.VideoWriter(
-			video_path,
-			fourcc,
-			20.0,
-			(width, height)
-		)
-
-		print(f"Recording video: {video_path}")
-
-	def scanning_state(self):
-		if self.heading is None:
-			print("Waiting for IMU during scan")
-			self.stop()
-			return
-		
-		if self.scan_last_heading is None:
-			self.scan_last_heading = self.heading
-
-		delta = self.heading - self.scan_last_heading
-
-		if delta > 180:
-			delta -= 360
-
-		if delta < -180:
-			delta += 360
-
-		self.scan_total_turn += abs(delta)
-		self.scan_last_heading = self.heading
-
-		if self.video_writer is not None and self.latest_frame is not None:
-			self.video_writer.write(self.latest_frame)
-
-		print("------------------------------")
-		print(f"State: {STATE_SCANNING}")
-		print(f"Heading: {self.heading:.2f}°")
-		print(f"Turned: {self.scan_total_turn:.2f}°")
-
-		if self.scan_total_turn >= 360:
-			print("360 scan complete.")
-
-			self.stop()
-
-			if self.video_writer is not None:
-				self.video_writer.release()
-				self.video_writer = None
-				print("Video saved.")
-
-			print(f"State: {STATE_RETURNING}")
-			print("Returning home...")
-
-			self.state = STATE_RETURNING
-			return
-		
-		cmd = Twist()
-		cmd.linear.x = 0.10
-		cmd.angular.z = 0.40
-
-		self.cmd_pub.publish(cmd)
 
 	def home_reached_state(self):
 		self.stop()

@@ -6,13 +6,10 @@ import socket
 import threading
 
 import rclpy
-import cv2
 from rclpy.node import Node
-from sensor_msgs.msg import NavSatFix, Imu, Image
+from sensor_msgs.msg import NavSatFix, Imu
 from geometry_msgs.msg import Twist
 from transforms3d.euler import quat2euler
-from cv_bridge import CvBridge
-
 
 
 HOST = "0.0.0.0"
@@ -23,29 +20,13 @@ MAX_SPEED = 0.15
 STEERING_GAIN = 0.01
 MAX_STEERING = 0.40
 
-STATE_WAITING = "WAITING_FOR_TARGET"
-STATE_NAVIGATING = "NAVIGATING_TO_TARGET"
-STATE_TARGET_REACHED = "TARGET_REACHED"
-STATE_RETURNING = "RETURNING_HOME"
-STATE_HOME_REACHED = "HOME_REACHED"
-STATE_SCANNING = "SCANNING_360"
-
 
 class NetworkWaypointController(Node):
 
 	def __init__(self):
 		super().__init__("network_waypoint_controller")
 
-		self.state = STATE_WAITING
-
-		# Video
-		self.bridge = CvBridge()
-		self.latest_frame = None
-
-		self.video_writer = None
-		self.scan_start_heading = None
-		self.scan_total_turn = 0.0
-		self.scan_last_heading = None
+		self.state = "WAITING_FOR_TARGET"
 
 		self.lat = None
 		self.lon = None
@@ -53,9 +34,6 @@ class NetworkWaypointController(Node):
 
 		self.target_lat = None
 		self.target_lon = None
-
-		self.home_lat = None
-		self.home_lon = None
 
 		self.last_distance = None
 		self.bad_distance_count = 0
@@ -66,7 +44,6 @@ class NetworkWaypointController(Node):
 
 		self.create_subscription(NavSatFix, "/fix", self.gps_callback, 10)
 		self.create_subscription(Imu, "/imu/data", self.imu_callback, 10)
-		self.create_subscription(Image, "/camera/color/image_raw", self.camera_callback, 10)
 
 		self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
@@ -76,15 +53,6 @@ class NetworkWaypointController(Node):
 	def gps_callback(self, msg):
 		self.lat = msg.latitude
 		self.lon = msg.longitude
-
-		#Adds function to determine what is "home" coordinates
-		if self.home_lat is None and self.home_lon is None:
-			if not math.isnan(self.lat) and not math.isnan(self.lon):
-				self.home_lat = self.lat
-				self.home_lon = self.lon
-				print("Home GPS saved:")
-				print(f"Home lat: {self.home_lat}")
-				print(f"Home lon: {self.home_lon}")
 
 	def imu_callback(self, msg):
 		q = msg.orientation
@@ -97,12 +65,6 @@ class NetworkWaypointController(Node):
 		])
 
 		self.heading = (math.degrees(yaw) + 360) % 360
-
-	def camera_callback(self, msg):
-		try:
-			self.latest_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="brg8")
-		except Exception as e:
-			print(f"Camera error: {e}")
 
 	def network_server(self):
 		server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -131,14 +93,14 @@ class NetworkWaypointController(Node):
 				self.printed_waiting_gps = False
 				self.printed_waiting_imu = False
 
-				self.state = STATE_NAVIGATING
+				self.state = "NAVIGATING"
 
 				print("----------------------------------------")
 				print(f"Connected by {addr}")
 				print("New target received:")
 				print(f"Target lat: {self.target_lat}")
 				print(f"Target lon: {self.target_lon}")
-				print(f"State: {STATE_NAVIGATING}")
+				print("State: NAVIGATING")
 
 			except Exception:
 				print("Invalid target format.")
@@ -150,163 +112,40 @@ class NetworkWaypointController(Node):
 		self.cmd_pub.publish(Twist())
 
 	def loop(self):
-		if self.state == STATE_WAITING:
+		if self.state == "WAITING_FOR_TARGET":
 			self.waiting_for_target_state()
 
-		elif self.state == STATE_NAVIGATING:
-			self.navigating_state("TARGET")
-		
-		elif self.state == STATE_RETURNING:
-			self.navigating_state("HOME")
-		
-		elif self.state == STATE_HOME_REACHED:
-			self.home_reached_state()
+		elif self.state == "NAVIGATING":
+			self.navigating_state()
 
-		elif self.state == STATE_TARGET_REACHED:
+		elif self.state == "TARGET_REACHED":
 			self.target_reached_state()
-		
-		elif self.state == STATE_SCANNING:
-			self.scanning_state()
 
 	def waiting_for_target_state(self):
 		self.stop()
 
 		if not self.printed_waiting_target:
-			print(f"State: " + STATE_WAITING)
+			print("State: WAITING_FOR_TARGET")
 			print("Waiting for target from laptop...")
 			self.printed_waiting_target = True
 
 	def target_reached_state(self):
 		self.stop()
 
-		print(f"State: {STATE_TARGET_REACHED}")
-		print("Target Reached.")
-		print(f"State: {STATE_SCANNING}")
-		print("Starting 360 video scan...")
+		print("State: TARGET_REACHED")
+		print("Mission complete for this waypoint.")
 
-		self.last_distance = None
-		self.bad_distance_count = 0
-
-		self.start_scan()
-
-		self.state = STATE_RETURNING
-
-	def start_scan(self):
-		self.scan_start_heading = self.heading
-		self.scan_last_heading = self.heading
-		self.scan_total_turn = 0.0
-
-		timestamp = int(time.time())
-		video_path = f"videos/scan_{timestamp}.mp4"
-
-		if self.latest_frame is None:
-			print("No camera frame yet. Scan will move, but video may not save")
-			self.video_writer = None
-			return
-		
-		height, width, channels = self.latest_frame.shape
-
-		fourcc = cv2.Videowriter_fourcc("mp4v")
-
-		self.video_writer = cv2.VideoWriter(
-			video_path,
-			fourcc,
-			20.0,
-			(width, height)
-		)
-
-		print(f"Recording video: {video_path}")
-
-	def scanning_state(self):
-		if self.heading is None:
-			print("Waiting for IMU during scan")
-			self.stop()
-			return
-		
-		if self.scan_last_heading is None:
-			self.scan_last_heading = self.heading
-
-		delta = self.heading - self.scan_last_heading
-
-		if delta > 180:
-			delta -= 360
-
-		if delta < -180:
-			delta += 360
-
-		self.scan_total_turn += abs(delta)
-		self.scan_last_heading = self.heading
-
-		if self.video_writer is not None and self.latest_frame is not None:
-			self.video_writer.write(self.latest_frame)
-
-		print("------------------------------")
-		print(f"State: {STATE_SCANNING}")
-		print(f"Heading: {self.heading:.2f}°")
-		print(f"Turned: {self.scan_total_turn:.2f}°")
-
-		if self.scan_total_turn >= 360:
-			print("360 scan complete.")
-
-			self.stop()
-
-			if self.video_writer is not None:
-				self.video_writer.release()
-				self.video_writer = None
-				print("Video saved.")
-
-			print(f"State: {STATE_RETURNING}")
-			print("Returning home...")
-
-			self.state = STATE_RETURNING
-			return
-		
-		cmd = Twist()
-		cmd.linear.x = 0.10
-		cmd.angular.z = 0.40
-
-		self.cmd_pub.publish(cmd)
-
-	def home_reached_state(self):
-		self.stop()
-
-		print(f"State: " + STATE_HOME_REACHED)
-		print("Mission complete. Waiting for next target.")
-
-		self.state = STATE_WAITING
-
+		self.state = "WAITING_FOR_TARGET"
 		self.target_lat = None
 		self.target_lon = None
-		
-		self.last_distance = None
-		self.bad_distance_count = 0
 
 		self.printed_waiting_target = False
-		self.printed_waiting_gps = False
-		self.printed_waiting_imu = False
 
-	def navigating_state(self, destination):
-		if destination == "TARGET":
-			dest_lat = self.target_lat
-			dest_lon = self.target_lon
-
-			if dest_lat is None or dest_lon is None:
-				self.state = STATE_WAITING
-				self.printed_waiting_target = False
-				self.printed_waiting_gps = False
-				self.printed_waiting_imu = False
-
-				return
-			
-			
-		else: 
-			dest_lat = self.home_lat
-			dest_lon = self.home_lon
-
-			if dest_lat is None or dest_lon is None:
-				print("Home GPS not saved yet. Stopping.")
-				self.stop()
-				return
+	def navigating_state(self):
+		if self.target_lat is None or self.target_lon is None:
+			self.state = "WAITING_FOR_TARGET"
+			self.printed_waiting_target = False
+			return
 
 		if self.lat is None or self.lon is None:
 			if not self.printed_waiting_gps:
@@ -331,22 +170,19 @@ class NetworkWaypointController(Node):
 
 			self.stop()
 			return
-		
-		self.printed_waiting_gps = False
-		self.printed_waiting_imu = False
 
 		distance = self.distance_to_target(
 			self.lat,
 			self.lon,
-			dest_lat,
-			dest_lon
+			self.target_lat,
+			self.target_lon
 		)
 
 		bearing = self.bearing_to_target(
 			self.lat,
 			self.lon,
-			dest_lat,
-			dest_lon
+			self.target_lat,
+			self.target_lon
 		)
 
 		if math.isnan(distance) or math.isnan(bearing):
@@ -366,17 +202,10 @@ class NetworkWaypointController(Node):
 			print("Distance getting worse. Stopping.")
 			self.stop()
 
-			self.state = STATE_WAITING
-
+			self.state = "WAITING_FOR_TARGET"
 			self.target_lat = None
 			self.target_lon = None
-
-			self.last_distance = None
-			self.bad_distance_count = 0
-
 			self.printed_waiting_target = False
-			self.printed_waiting_gps = False
-			self.printed_waiting_imu = False
 
 			return
 
@@ -389,25 +218,18 @@ class NetworkWaypointController(Node):
 			error += 360
 
 		print("----------------------------------------")
-		print(f"State   : {self.state}")
+		print("State   : NAVIGATING")
 		print(f"Current : {self.lat:.6f}, {self.lon:.6f}")
-		print(f"Target  : {dest_lat:.6f}, {dest_lon:.6f}")
+		print(f"Target  : {self.target_lat:.6f}, {self.target_lon:.6f}")
 		print(f"Distance: {distance:.2f} m")
 		print(f"Bearing : {bearing:.2f}°")
 		print(f"Heading : {self.heading:.2f}°")
 		print(f"Error   : {error:.2f}°")
 
 		if distance <= STOP_DISTANCE:
+			print("TARGET REACHED")
 			self.stop()
-
-			if destination == "TARGET":
-				print("TARGET REACHED")
-				self.state = STATE_TARGET_REACHED
-			else:
-				print("HOME REACHED")
-				self.state = STATE_HOME_REACHED
-
-
+			self.state = "TARGET_REACHED"
 			return
 
 		steering = error * STEERING_GAIN
