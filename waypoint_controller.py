@@ -100,7 +100,7 @@ class NetworkWaypointController(Node):
 
 	def camera_callback(self, msg):
 		try:
-			self.latest_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="brg8")
+			self.latest_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 		except Exception as e:
 			print(f"Camera error: {e}")
 
@@ -206,7 +206,7 @@ class NetworkWaypointController(Node):
 		
 		height, width, channels = self.latest_frame.shape
 
-		fourcc = cv2.Videowriter_fourcc("mp4v")
+		fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
 		self.video_writer = cv2.VideoWriter(
 			video_path,
